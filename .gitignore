@@ -1,0 +1,4 @@
+# Environment — jangan pernah commit credential
+.env
+.env.local
+.env.*.local

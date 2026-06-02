@@ -1,0 +1,170 @@
+# =============================================================================
+# Elshobah Workspace — Paperclip Production Stack
+# Deploy via: Dokploy → Docker Compose
+#
+# Cara pakai di Dokploy:
+#   1. Buat project baru → pilih "Docker Compose"
+#   2. Source: paste isi file ini, atau link ke Git repo
+#   3. Tab Environment: isi semua variable dari .env.example
+#   4. Tab Domains: tambah domain paperclip.elshobah.com → port 3100
+#      Dokploy akan handle SSL otomatis via Traefik (built-in)
+#   5. Deploy
+#
+# TIDAK perlu Cloudflare Tunnel — Dokploy sudah punya Traefik reverse proxy
+# dengan SSL otomatis (Let's Encrypt) built-in.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Paperclip Application Server
+  # Dokploy expose port ini via Traefik → HTTPS otomatis
+  # ---------------------------------------------------------------------------
+  paperclip:
+    image: ghcr.io/paperclipai/paperclip:latest
+    pull_policy: always
+    container_name: elshobah-paperclip
+    restart: unless-stopped
+
+    expose:
+      - "3100"
+
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      NODE_ENV: production
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: public
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
+      PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      DATABASE_URL: postgres://paperclip:${POSTGRES_PASSWORD}@db:5432/paperclip
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PAPERCLIP_TELEMETRY_DISABLED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    volumes:
+      # Named volume — compatible dengan Dokploy Volume Backups ke S3
+      - paperclip-data:/paperclip
+
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    networks:
+      - elshobah-internal
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17
+  # Gunakan named volume agar bisa backup otomatis via Dokploy → S3
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:17-alpine
+    container_name: elshobah-postgres
+    restart: unless-stopped
+
+    # Tidak expose ke host — hanya internal network
+    expose:
+      - "5432"
+
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: paperclip
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    networks:
+      - elshobah-internal
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: elshobah-redis
+    restart: unless-stopped
+
+    expose:
+      - "6379"
+
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+
+    volumes:
+      - redis-data:/data
+
+    networks:
+      - elshobah-internal
+
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# =============================================================================
+# Named Volumes — Dokploy bisa backup ke S3 via Volume Backups feature
+# =============================================================================
+volumes:
+  paperclip-data:
+    name: elshobah_paperclip_data
+
+  postgres-data:
+    name: elshobah_postgres_data
+
+  redis-data:
+    name: elshobah_redis_data
+
+# =============================================================================
+# Internal Network — DB dan Redis tidak bisa diakses dari luar compose
+# =============================================================================
+networks:
+  elshobah-internal:
+    name: elshobah_internal
+    driver: bridge
